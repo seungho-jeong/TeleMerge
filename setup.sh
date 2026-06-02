@@ -37,4 +37,5 @@ sed \
 sudo cp "/tmp/$SERVICE" "$LINK"
 sudo systemctl daemon-reload
 sudo systemctl enable --now "$SERVICE"
+sudo systemctl try-restart "$SERVICE" || sudo systemctl start "$SERVICE"
 sudo systemctl status "$SERVICE" --no-pager
