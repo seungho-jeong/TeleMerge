@@ -1,0 +1,39 @@
+# TeleMerge Configuration
+# 이 파일을 config.yaml로 복사한 후 값을 채워주세요.
+# cp config.yaml.example config.yaml
+
+# Telegram API 설정 (https://my.telegram.org 에서 발급)
+api_id: 12345678
+api_hash: "your_api_hash_here"
+
+# 수집할 소스 채널/그룹 목록
+# 공개 채널: "@channel_username"
+# 비공개 채널: copy message link → https://t.me/c/1234567890/1 에서 가운데 숫자 앞에 -100 붙이기
+sources:
+  - "@example_channel"
+  - "@another_channel"
+  - -1001234567890  # 비공개 채널 예시
+
+# 목적지 설정
+# target: 채널 ID 또는 "me" (나에게 전송)
+# type: "channel" 또는 "self"
+destinations:
+  - target: -1001234567890
+    type: "channel"
+
+# 키워드 필터
+filters:
+  include: []               # 예: ["AI", "Bitcoin"] — 이 키워드를 포함하는 메시지만 전달
+  exclude: []               # 예: ["광고", "스팸"] — 이 키워드를 포함하는 메시지 제외
+
+# 소스 채널명 헤더 표시
+show_source_header: true
+
+# 미디어 포함 포워딩
+forward_media: true
+
+# 봇 토큰 (@BotFather에서 발급, 목적지 채널에 관리자로 추가 필요)
+bot_token: "your_bot_token_here"
+
+# 로깅 레벨 (DEBUG, INFO, WARNING, ERROR)
+log_level: "INFO"

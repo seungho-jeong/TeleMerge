@@ -1,0 +1,20 @@
+# Sessions
+*.session
+*.session-journal
+
+# Config (contains secrets)
+config.yaml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Claude
+.claude/
+
+.DS_Store
