@@ -30,6 +30,9 @@ sed \
     -e "s|ExecStart=.*|ExecStart=$REPO/.venv/bin/python telemerge.py|" \
     "$REPO/$SERVICE" > "/tmp/$SERVICE"
 
+# preflight 체크
+"$REPO/.venv/bin/python" "$REPO/preflight.py" || exit 1
+
 # systemd 등록
 sudo cp "/tmp/$SERVICE" "$LINK"
 sudo systemctl daemon-reload
