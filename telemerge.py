@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 import re
+import hashlib
 import sys
 from pathlib import Path
 
@@ -115,6 +116,35 @@ class TelegramAggregator:
             self.bot_client = None
         self.forward_media = config.get("forward_media", True)
         self.source_names: dict[int, str] = {}  # chat_id → display name 캐시
+
+    def _get_message_signature(self, message) -> str:
+        """메시지의 고유 식별자(Signature)를 생성합니다."""
+        # 1. 텔레그램 네이티브 포워딩인 경우
+        if message.fwd_from and message.fwd_from.from_id:
+           from_id = getattr(message.fwd_from.from_id, 'channel_id', None) or \
+                     getattr(message.fwd_from.from_id, 'user_id', None)
+           orig_msg_id = getattr(message.fwd_from, 'channel_post', None) or \
+                         getattr(message.fwd_from, 'saved_from_msg_id', None)
+           if from_id and orig_msg_id:
+               return f"fwd:{from_id}:{orig_msg_id}"
+
+        # # 2. 미디어가 있는 경우 우선 처리 (동일 이미지/파일 + 다른 코멘트 중복 방지)
+        # if message.media:
+        #    if hasattr(message.media, 'document') and message.media.document:
+        #        return f"media:{message.media.document.id}"
+        #    if hasattr(message.media, 'photo') and message.media.photo:
+        #        return f"media:{message.media.photo.id}"
+        #    # MessageMediaWebPage(링크 프리뷰) 등은 미디어 서명에서 제외하고 텍스트로 넘김
+        #
+        # # 3. 미디어가 없는 텍스트 단독 메시지인 경우
+        # text = message.text or message.message or ""
+        # if text:
+        #     normalized_text = re.sub(r'\s+', '', text).strip()
+        #     text_hash = hashlib.md5(normalized_text.encode('utf-8')).hexdigest()
+        #     return f"text:{text_hash}"
+
+        # 4. 위 조건에 해당하지 않는 경우
+        return f"local:{message.chat_id}:{message.id}"
 
     async def resolve_entity(self, source):
         """소스를 entity로 변환하고 캐시"""
@@ -263,40 +293,58 @@ class TelegramAggregator:
                 self._forwarded.add((chat_id, msg.id))
             return
 
+        # 글로벌 중복 검사 (앨범은 첫 번째 메시지 기준으로 식별)
+        signature = self._get_message_signature(first)
+        if signature in self._seen_signatures:
+            self.logger.info(f"타 채널에서 이미 수집된 중복 앨범 스킵: {self.source_names.get(chat_id, chat_id)}")
+            for msg in messages:
+                self._forwarded.add((chat_id, msg.id))
+            return
+
+        # 사전 예약 (Lock)
+        self._seen_signatures.add(signature)
         for msg in messages:
             self._forwarded.add((chat_id, msg.id))
 
         forwarded = False
-        for dest in destinations:
-            if self.bot_client:
-                try:
-                    await self._send_album(dest, messages, chat_id)
-                    self.logger.info(
-                        f"앨범 전달 완료 (봇): {self.source_names.get(chat_id, chat_id)} → {len(messages)}장"
-                    )
-                    forwarded = True
-                except Exception as e:
-                    self.logger.error(f"봇 앨범 전달 실패 ({dest}): {e}")
-            else:
-                try:
-                    await self.client.forward_messages(dest, messages)
-                    self.logger.info(
-                        f"앨범 전달 완료 (네이티브): {self.source_names.get(chat_id, chat_id)} → {len(messages)}장"
-                    )
-                    forwarded = True
-                except Exception as e:
-                    self.logger.warning(f"네이티브 앨범 전달 실패, fallback 시도: {e}")
+        try:
+            for dest in destinations:
+                if self.bot_client:
                     try:
                         await self._send_album(dest, messages, chat_id)
                         self.logger.info(
-                            f"앨범 전달 완료 (fallback): {self.source_names.get(chat_id, chat_id)} → {len(messages)}장"
+                            f"앨범 전달 완료 (봇): {self.source_names.get(chat_id, chat_id)} → {len(messages)}장"
                         )
                         forwarded = True
-                    except Exception as e2:
-                        self.logger.error(f"fallback 앨범 전달도 실패 ({dest}): {e2}")
+                    except Exception as e:
+                        self.logger.error(f"봇 앨범 전달 실패 ({dest}): {e}")
+                else:
+                    try:
+                        await self.client.forward_messages(dest, messages)
+                        self.logger.info(
+                            f"앨범 전달 완료 (네이티브): {self.source_names.get(chat_id, chat_id)} → {len(messages)}장"
+                        )
+                        forwarded = True
+                    except Exception as e:
+                        self.logger.warning(f"네이티브 앨범 전달 실패, fallback 시도: {e}")
+                        try:
+                            await self._send_album(dest, messages, chat_id)
+                            self.logger.info(
+                                f"앨범 전달 완료 (fallback): {self.source_names.get(chat_id, chat_id)} → {len(messages)}장"
+                            )
+                            forwarded = True
+                        except Exception as e2:
+                            self.logger.error(f"fallback 앨범 전달도 실패 ({dest}): {e2}")
 
-        if forwarded:
-            await self.client.send_read_acknowledge(chat_id, messages[-1])
+                if forwarded:
+                    await self.client.send_read_acknowledge(chat_id, messages[-1])
+        finally:
+            # 모든 전송이 실패한 경우에만 예약 해제 (Rollback)
+            if not forwarded:
+                self._seen_signatures.discard(signature)
+                for msg in messages:
+                    self._forwarded.discard((chat_id, msg.id))
+                self.logger.warning(f"앨범 전송 전면 실패, 서명 롤백: {signature}")
 
     async def _send_album(self, dest, messages: list, chat_id: int):
         """앨범을 목적지로 전송 (미디어 다운로드 → 일괄 전송)"""
@@ -363,39 +411,54 @@ class TelegramAggregator:
             self._forwarded.add((chat_id, message.id))
             return
 
+        # 글로벌 중복 검사
+        signature = self._get_message_signature(message)
+        if signature in self._seen_signatures:
+            self.logger.info(f"타 채널에서 이미 수집된 중복 메시지 스킵: {self.source_names.get(chat_id, chat_id)}")
+            return
+
+        # 사전 예약 (Lock)
+        self._seen_signatures.add(signature)
         self._forwarded.add((chat_id, message.id))
 
         forwarded = False
-        for dest in destinations:
-            if self.bot_client:
-                try:
-                    await self._send_message(dest, message, chat_id)
-                    self.logger.info(
-                        f"전달 완료 (봇): {self.source_names.get(chat_id, chat_id)}"
-                    )
-                    forwarded = True
-                except Exception as e:
-                    self.logger.error(f"봇 전달 실패 ({dest}): {e}")
-            else:
-                try:
-                    await self.client.forward_messages(dest, message)
-                    self.logger.info(
-                        f"전달 완료 (네이티브): {self.source_names.get(chat_id, chat_id)}"
-                    )
-                    forwarded = True
-                except Exception as e:
-                    self.logger.warning(f"네이티브 전달 실패, fallback 시도: {e}")
+        try:
+            for dest in destinations:
+                if self.bot_client:
                     try:
                         await self._send_message(dest, message, chat_id)
                         self.logger.info(
-                            f"전달 완료 (fallback): {self.source_names.get(chat_id, chat_id)}"
+                            f"전달 완료 (봇): {self.source_names.get(chat_id, chat_id)}"
                         )
                         forwarded = True
-                    except Exception as e2:
-                        self.logger.error(f"fallback 전달도 실패 ({dest}): {e2}")
+                    except Exception as e:
+                        self.logger.error(f"봇 전달 실패 ({dest}): {e}")
+                else:
+                    try:
+                        await self.client.forward_messages(dest, message)
+                        self.logger.info(
+                            f"전달 완료 (네이티브): {self.source_names.get(chat_id, chat_id)}"
+                        )
+                        forwarded = True
+                    except Exception as e:
+                        self.logger.warning(f"네이티브 전달 실패, fallback 시도: {e}")
+                        try:
+                            await self._send_message(dest, message, chat_id)
+                            self.logger.info(
+                                f"전달 완료 (fallback): {self.source_names.get(chat_id, chat_id)}"
+                            )
+                            forwarded = True
+                        except Exception as e2:
+                            self.logger.error(f"fallback 전달도 실패 ({dest}): {e2}")
 
-        if forwarded:
-            await self.client.send_read_acknowledge(chat_id, message)
+                if forwarded:
+                    await self.client.send_read_acknowledge(chat_id, message)
+        finally:
+            # 모든 전송이 실패한 경우에만 예약 해제 (Rollback)
+            if not forwarded:
+                self._seen_signatures.discard(signature)
+                self._forwarded.discard((chat_id, message.id))
+                self.logger.warning(f"메시지 전송 전면 실패, 서명 롤백: {signature}")
 
     async def _poll_missed(self, source_ids: list[int], destinations):
         """주기적으로 소스 채널을 확인하여 누락된 메시지를 포워딩"""
