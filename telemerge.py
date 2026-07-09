@@ -60,6 +60,28 @@ class MessageFilter:
         return any(p.search(text) for p in self.include_patterns)
 
 
+# ─── Bounded Cache ────────────────────────────────────────────────
+
+class BoundedSet:
+    """크기 제한이 있는 Set. 최대 크기를 넘으면 가장 오래된 아이템을 삭제합니다."""
+    def __init__(self, max_size: int = 10000):
+        self.max_size = max_size
+        self._data = {}  # 파이썬 3.7+ 에서는 dict가 삽입 순서를 유지함
+
+    def add(self, item):
+        self._data[item] = None
+        if len(self._data) > self.max_size:
+            # 가장 먼저 들어온(오래된) 키 제거 (O(1) 성능)
+            self._data.pop(next(iter(self._data)))
+
+    def discard(self, item):
+        """항목이 존재하면 삭제합니다 (실패 시 롤백용)."""
+        self._data.pop(item, None)
+
+    def __contains__(self, item) -> bool:
+        return item in self._data
+
+
 # ─── Aggregator ───────────────────────────────────────────────────
 
 class TelegramAggregator:
@@ -69,7 +91,8 @@ class TelegramAggregator:
         self.config = config
         self.logger = setup_logger(config.get("log_level", "INFO"))
         self._queue: asyncio.Queue = asyncio.Queue()
-        self._forwarded: set[tuple[int, int]] = set()  # (chat_id, msg_id)
+        self._forwarded: BoundedSet = BoundedSet(max_size=10000)  # (chat_id, msg_id)
+        self._seen_signatures: BoundedSet = BoundedSet(max_size=10000)
         self._poll_interval = config.get("poll_interval", 300)  # 기본 5분
         self._poll_limit = config.get("poll_limit", 100)  # 폴링 시 스캔할 메시지 수
         self.client = TelegramClient(
